@@ -130,7 +130,7 @@ pub fn constrain_header_field<let MAX_HEADER_LENGTH: u32, let MAX_HEADER_FIELD_L
     // new header line and must never be inside the field.
     // REASON (cost): the fold is checked with two carried flags instead of reading header[index + 1]
     // and header[index + 2] in each iteration; every dynamic read is a memory op, and this loop runs
-    // MAX_HEADER_FIELD_LENGTH (1024 for DKIM-Signature) times.
+    // MAX_HEADER_FIELD_LENGTH times (300 by default for DKIM-Signature).
     // (Measured on examples/verify_email_2048_bit_dkim: ~12k fewer ACIR opcodes than three reads.)
     let start_index = header_field_sequence.index + HEADER_FIELD_NAME_LENGTH + 1;
     let end_index = header_field_sequence.end_index();

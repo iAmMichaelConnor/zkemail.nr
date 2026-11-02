@@ -210,7 +210,11 @@ mod test_redc_binding_1024 {
 
 mod header_field_access {
 
-    use crate::{headers::body_hash::get_body_hash, Sequence, tests::test_inputs::EmailLarge};
+    use crate::{
+        headers::body_hash::{get_body_hash, get_body_hash_with_max_field_length},
+        Sequence,
+        tests::test_inputs::EmailLarge,
+    };
 
     #[test(should_fail_with = "No ':bh=' or '; bh=' prefix found before body hash")]
     fn test_bad_body_hash_off_one_minus() {
@@ -274,7 +278,8 @@ mod header_field_access {
         // tests against "dkim-signature: v=1; a=rsa-sha256; d=example.com; s=selector; c=relaxed/relaxed; q=dns/txt; t=1683849600; x=1684454400; h=from:to:subject:date; z=From:bh=7xQMDuoVVU4m0W0WRVSrVXMeGSIASsnucK9dJsrc+vU=@domain.com|To:recipient@example.net|Subject:Hello|Date:Thu, 11 May 2023 15:00:00 -0700; bh=2jUSOH9NhtVGCaWpZT2ncBgaamXkef9OgICHkqfsmKY=; b="
         let (header, body_hash_index) = EmailLarge::tampered_dkim_field();
         let sequence: Sequence = Sequence { index: 0, length: header.len() };
-        let _ = get_body_hash(header, sequence, body_hash_index);
+        // the 323-byte value is over the default cap
+        let _ = get_body_hash_with_max_field_length::<338, 1024>(header, sequence, body_hash_index);
     }
 
     #[test(should_fail_with = "Header field must end with CRLF")]
@@ -535,7 +540,13 @@ mod test_address_extraction {
 
 // Header-field parsing: case-insensitive names, folded fields (c=simple), field length bound.
 mod test_header_field_canonicalization {
-    use crate::{headers::{body_hash::get_body_hash, constrain_header_field}, Sequence};
+    use crate::{
+        headers::{
+            body_hash::{get_body_hash, get_body_hash_with_max_field_length},
+            constrain_header_field,
+        },
+        Sequence,
+    };
 
     // sha256("") = e3b0c442...b855, base64 "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
     global EMPTY_BODY_HASH: [u8; 32] = [
@@ -606,7 +617,7 @@ mod test_header_field_canonicalization {
         constrain_header_field::<64, 4, 4>(header, Sequence { index: 0, length: 18 }, from);
     }
 
-    // Same bound on the DKIM-Signature path (MAX_DKIM_HEADER_FIELD_LENGTH = 1024).
+    // Same bound on the DKIM-Signature path (the default MAX_DKIM_HEADER_FIELD_LENGTH).
     #[test(should_fail_with = "Header field too long")]
     fn test_dkim_field_longer_than_max_rejected() {
         let prefix: [u8; 68] = comptime {
@@ -620,7 +631,8 @@ mod test_header_field_canonicalization {
         let _ = get_body_hash(header, Sequence { index: 0, length: 1100 }, 23);
     }
 
-    // Long real-world DKIM-Signature fields (> the old 300-byte window) must still be accepted.
+    // Long real-world DKIM-Signature fields (longer than the default cap) are accepted with a
+    // larger cap.
     #[test]
     fn test_dkim_field_of_900_bytes_accepted() {
         let prefix: [u8; 68] = comptime {
@@ -631,7 +643,11 @@ mod test_header_field_canonicalization {
             storage[i] = prefix[i];
         }
         let header: BoundedVec<u8, 900> = BoundedVec::from_array(storage);
-        let body_hash = get_body_hash(header, Sequence { index: 0, length: 900 }, 23);
+        let body_hash = get_body_hash_with_max_field_length::<900, 1024>(
+            header,
+            Sequence { index: 0, length: 900 },
+            23,
+        );
         assert(body_hash == EMPTY_BODY_HASH);
     }
 

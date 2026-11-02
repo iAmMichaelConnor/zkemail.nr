@@ -109,7 +109,8 @@ for (const file of emails(root)) {
         continue;
       }
       assert.equal(canonicalizedHeader.subarray(selected.bodyHashIndex, selected.bodyHashIndex + 44).toString('latin1'), identity.bodyHash);
-      if (+selected.sequence.length > 1024) bump('signature_field_exceeds_noir_limit');
+      // get_body_hash's default cap: 300 value bytes after "dkim-signature:" (15 bytes)
+      if (+selected.sequence.length > 15 + 300) bump('signature_field_exceeds_noir_limit');
       bump('signature_selection_compatible');
       mutations(canonicalizedHeader, identity, selected);
     } catch { bump('unexpected_check_failure'); }
