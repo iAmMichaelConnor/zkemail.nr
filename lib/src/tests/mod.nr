@@ -411,6 +411,7 @@ mod test_address_extraction {
     // header field constrains are not checked here, should work same as tests in header_field_access
     use crate::{
         headers::email_address::get_email_address,
+        Sequence,
         tests::test_inputs::{EmailAddresses, EmailAddressUnderscore},
     };
 
@@ -551,6 +552,152 @@ mod test_address_extraction {
             header,
             EmailAddresses::ADDRESS_ONLY_FIELD_SEQUENCE,
             malicious_sequence,
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Address fields must not contain line breaks, comments or quoted-pairs")]
+    fn test_short_field_spanning_next_line() {
+        // the CRLF after "a@b" sits in the first bytes of the value
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let header: BoundedVec<u8, 31> = BoundedVec::from_array(
+            comptime { "\r\nfrom:a@b\r\nto:<victim@x.com>\r\n".as_bytes() },
+        );
+        let _ = get_email_address(
+            header,
+            Sequence { index: 2, length: 27 },
+            Sequence { index: 16, length: 12 },
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Header field too long")]
+    fn test_long_field_spanning_next_line() {
+        // the CRLF after a 330-byte value is past the scanned range
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let start: [u8; 7] = comptime { "\r\nfrom:".as_bytes() };
+        let end: [u8; 26] = comptime { "\r\nsubject:<victim@x.com>\r\n".as_bytes() };
+        let mut storage: [u8; 363] = [0x41; 363];
+        for i in 0..7 {
+            storage[i] = start[i];
+        }
+        for i in 0..26 {
+            storage[337 + i] = end[i];
+        }
+        let header: BoundedVec<u8, 363> = BoundedVec::from_array(storage);
+        let _ = get_email_address(
+            header,
+            Sequence { index: 2, length: 359 },
+            Sequence { index: 348, length: 12 },
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Address fields must not contain line breaks, comments or quoted-pairs")]
+    fn test_address_in_trailing_comment() {
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let header: BoundedVec<u8, 40> = BoundedVec::from_array(
+            comptime { "\r\nfrom:<bob@evil.com> (<ceo@bank.com>)\r\n".as_bytes() },
+        );
+        let _ = get_email_address(
+            header,
+            Sequence { index: 2, length: 36 },
+            Sequence { index: 24, length: 12 },
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Email address and its closing '>' must end the field")]
+    fn test_address_in_quoted_display_name() {
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let header: BoundedVec<u8, 38> = BoundedVec::from_array(
+            comptime { "\r\nfrom:\"<ceo@bank.com>\" bob@evil.com\r\n".as_bytes() },
+        );
+        let _ = get_email_address(
+            header,
+            Sequence { index: 2, length: 34 },
+            Sequence { index: 9, length: 12 },
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Email address must end the field if no bracket is present")]
+    fn test_bare_address_in_quoted_string() {
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let header: BoundedVec<u8, 39> = BoundedVec::from_array(
+            comptime { "\r\nfrom:bob@evil.com \"x ceo@bank.com>\"\r\n".as_bytes() },
+        );
+        let _ = get_email_address(
+            header,
+            Sequence { index: 2, length: 35 },
+            Sequence { index: 23, length: 12 },
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Address fields must not contain line breaks, comments or quoted-pairs")]
+    fn test_address_in_unterminated_comment() {
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let header: BoundedVec<u8, 39> = BoundedVec::from_array(
+            comptime { "\r\nfrom:<bob@evil.com> (<ceo@bank.com>\r\n".as_bytes() },
+        );
+        let _ = get_email_address(
+            header,
+            Sequence { index: 2, length: 35 },
+            Sequence { index: 24, length: 12 },
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Unterminated quoted string")]
+    fn test_address_in_unterminated_quote() {
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let header: BoundedVec<u8, 37> = BoundedVec::from_array(
+            comptime { "\r\nfrom:bob@evil.com \"<ceo@bank.com>\r\n".as_bytes() },
+        );
+        let _ = get_email_address(
+            header,
+            Sequence { index: 2, length: 33 },
+            Sequence { index: 22, length: 12 },
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Email address must start immediately after '<' if bracket is present")]
+    fn test_early_angle_bracket_cannot_select_later_address() {
+        let header: BoundedVec<u8, 64> =
+            BoundedVec::from_array(comptime { "from:<real@a.bc> fake@b.cd".as_bytes() });
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let _ = get_email_address(
+            header,
+            Sequence { index: 0, length: 26 },
+            Sequence { index: 17, length: 9 },
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Email address must contain '@'")]
+    fn test_address_without_at_rejected() {
+        let header: BoundedVec<u8, 32> =
+            BoundedVec::from_array(comptime { "from:fake".as_bytes() });
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let _ = get_email_address(
+            header,
+            Sequence { index: 0, length: 9 },
+            Sequence { index: 5, length: 4 },
+            from,
+        );
+    }
+
+    #[test(should_fail_with = "Email address must contain '@' exactly once")]
+    fn test_address_with_two_at_signs_rejected() {
+        let header: BoundedVec<u8, 32> =
+            BoundedVec::from_array(comptime { "from:a@@b.cd".as_bytes() });
+        let from: [u8; 4] = comptime { "from".as_bytes() };
+        let _ = get_email_address(
+            header,
+            Sequence { index: 0, length: 12 },
+            Sequence { index: 5, length: 7 },
             from,
         );
     }

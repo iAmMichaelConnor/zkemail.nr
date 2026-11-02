@@ -87,6 +87,41 @@ export function getHeaderSequence(
 }
 
 /**
+ * Find every field named `headerField` in a canonicalized header, as [start, end) byte offsets.
+ *
+ * - the field name is matched case-insensitively at the start of a header line;
+ * - folded continuation lines (CRLF followed by SP or HTAB) belong to the field;
+ * - `end` excludes the CRLF that terminates the field.
+ *
+ * NOTE: the header is decoded as latin1 so every byte is one string index. The default utf8 decoding
+ * shifts every later offset when the header contains non-ASCII bytes.
+ */
+function findHeaderFields(header: Buffer, headerField: string): { index: number; end: number }[] {
+  const headerStr = header.toString("latin1");
+  const lowerHeader = headerStr.toLowerCase();
+  const prefix = `${headerField.toLowerCase()}:`;
+  const fields: { index: number; end: number }[] = [];
+  let lineStart = 0;
+  while (lineStart !== -1) {
+    if (lowerHeader.startsWith(prefix, lineStart)) {
+      // the field ends at the first CRLF not followed by SP / HTAB (a fold), or at the header end
+      let end = headerStr.length;
+      for (let i = headerStr.indexOf("\r\n", lineStart); i !== -1; i = headerStr.indexOf("\r\n", i + 2)) {
+        const next = headerStr[i + 2];
+        if (next !== " " && next !== "\t") {
+          end = i;
+          break;
+        }
+      }
+      fields.push({ index: lineStart, end });
+    }
+    const lineEnd = headerStr.indexOf("\r\n", lineStart);
+    lineStart = lineEnd === -1 ? -1 : lineEnd + 2;
+  }
+  return fields;
+}
+
+/**
  * Get the index and length of a header field as well as the address in the field
  * @dev only works for to, from. Not set up for cc
  *
@@ -95,20 +130,46 @@ export function getHeaderSequence(
  * @returns - the index and length of the field in the header and the index and length of the address in the field
  */
 export function getAddressHeaderSequence(header: Buffer, headerField: string) {
-  const regexPrefix = `[${headerField[0].toUpperCase()}${headerField[0].toLowerCase()}]${headerField
-    .slice(1)
-    .toLowerCase()}`;
-  const regex = new RegExp(
-    `${regexPrefix}:.*?<([^>]+)>|${regexPrefix}:.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+.[a-zA-Z]{2,})`
-  );
-  const headerStr = header.toString();
-  const match = headerStr.match(regex);
-  if (match === null) throw new Error(`Field "${headerField}" not found in header`);
-  if (match[1] === null && match[2] === null) throw new Error(`Address not found in "${headerField}" field`);
-  const address = match[1] || match[2];
-  const addressIndex = headerStr.indexOf(address);
+  const name = headerField.toLowerCase();
+  if (name !== "from" && name !== "to") throw new Error("Only From and To address extraction is supported");
+  const fields = findHeaderFields(header, name);
+  if (fields.length !== 1) throw new Error(`Expected exactly one "${name}" field`);
+  const { index, end } = fields[0];
+  // the circuit scans at most MAX_EMAIL_ADDRESS_LENGTH (320) value bytes of an address field
+  if (end - index > 320 + name.length + 1) throw new Error(`"${name}" field too long`);
+  // Use byte offsets, the complete field (including folds), and only search its value.
+  // Searching the entire header can select a lookalike in Subject or an earlier repeated address.
+  const valueStart = index + name.length + 1;
+  const value = header.subarray(valueStart, end).toString("latin1");
+  // The circuit rejects comments, quoted-pairs and unclosed quoted strings in address fields, and
+  // requires the address to end the field (headers/email_address.nr). Fail here with a clear error
+  // instead of in witness generation.
+  if (/[(\\]/.test(value)) throw new Error("Comments and quoted-pairs are not supported in address fields");
+  if ((value.match(/"/g) || []).length % 2 !== 0) throw new Error("Unterminated quoted string");
+  const bracket = value.lastIndexOf("<");
+  let offset: number;
+  let address: string;
+  if (bracket !== -1) {
+    offset = bracket + 1;
+    const close = value.indexOf(">", offset);
+    if (close === -1) throw new Error("Address is missing a closing angle bracket");
+    address = value.slice(offset, close);
+    // Multiple mailboxes cannot establish an unambiguous single-address claim.
+    if (value.slice(0, bracket).includes(">") || value.slice(close + 1).includes("@")) {
+      throw new Error("Multiple addresses are not supported");
+    }
+    if (close + 1 !== value.length) throw new Error("The address must end the field");
+  } else {
+    address = value.trim();
+    offset = value.indexOf(address);
+    if (offset + address.length !== value.length) throw new Error("The address must end the field");
+  }
+  // Match the circuit's intentionally restricted character set; do not silently extract a
+  // supported-looking suffix from unsupported syntax (e.g. the tail of a plus-address).
+  if (!/^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(address)) throw new Error("Unsupported address syntax");
+  const addressIndex = valueStart + offset;
   return [
-    { index: match.index!.toString(), length: match[0].length.toString() },
+    { index: index.toString(), length: (end - index).toString() },
     { index: addressIndex.toString(), length: address.length.toString() },
   ];
 }
